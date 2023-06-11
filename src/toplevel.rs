@@ -1,20 +1,22 @@
-use std::future::Future;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    future::Future,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 use tokio_util::sync::CancellationToken;
 
-use crate::errors::GracefulShutdownError;
-use crate::exit_state::prettify_exit_states;
-use crate::shutdown_token::create_shutdown_token;
-use crate::signal_handling::wait_for_signal;
-use crate::utils::get_subsystem_name;
-use crate::utils::wait_forever;
-use crate::utils::ShutdownGuard;
-use crate::ErrTypeTraits;
-use crate::{ShutdownToken, SubsystemHandle};
+use crate::{
+    errors::GracefulShutdownError,
+    exit_state::prettify_exit_states,
+    shutdown_token::create_shutdown_token,
+    signal_handling::wait_for_signal,
+    utils::{get_subsystem_name, wait_forever, ShutdownGuard},
+    ErrTypeTraits, ShutdownToken, SubsystemHandle,
+};
 
 use super::subsystem::SubsystemData;
 
@@ -26,9 +28,11 @@ use super::subsystem::SubsystemData;
 /// # Examples
 ///
 /// ```
-/// use miette::Result;
-/// use tokio::time::Duration;
-/// use tokio_graceful_shutdown::{SubsystemHandle, Toplevel};
+/// use {
+///     miette::Result,
+///     tokio::time::Duration,
+///     tokio_graceful_shutdown::{SubsystemHandle, Toplevel},
+/// };
 ///
 /// async fn my_subsystem(subsys: SubsystemHandle) -> Result<()> {
 ///     subsys.request_shutdown();
@@ -46,7 +50,6 @@ use super::subsystem::SubsystemData;
 ///         .map_err(Into::into)
 /// }
 /// ```
-///
 #[must_use = "This toplevel must be consumed by calling `handle_shutdown_requests` on it."]
 pub struct Toplevel<ErrType: ErrTypeTraits = crate::BoxedError> {
     subsys_data: Arc<SubsystemData<ErrType>>,
@@ -94,8 +97,8 @@ impl<ErrType: ErrTypeTraits> Toplevel<ErrType> {
     ///
     /// # Arguments
     ///
-    /// * `parent` - The subsystemhandle that the [Toplevel] object will receive shutdown
-    ///              requests from
+    /// * `parent` - The subsystemhandle that the [Toplevel] object will receive shutdown requests
+    ///   from
     /// * `name` - The name of the nested toplevel object. Can be `""`.
     pub fn nested(parent: &SubsystemHandle, name: &str) -> Self {
         // Take shutdown tokesn from parent
@@ -132,20 +135,21 @@ impl<ErrType: ErrTypeTraits> Toplevel<ErrType> {
     /// The functionality of the subsystem is represented by the 'subsystem' argument.
     /// It has to be provided either as an asynchronous function or an asynchronous closure.
     ///
-    /// It gets provided with a [`SubsystemHandle`] object which can be used to interact with this crate.
+    /// It gets provided with a [`SubsystemHandle`] object which can be used to interact with this
+    /// crate.
     ///
     /// ## Returns
     ///
-    /// When the subsystem returns `Ok(())` it is assumed that the subsystem was stopped intentionally and no further
-    /// actions are performed.
+    /// When the subsystem returns `Ok(())` it is assumed that the subsystem was stopped
+    /// intentionally and no further actions are performed.
     ///
-    /// When the subsystem returns an `Err`, it is assumed that the subsystem failed and a program shutdown gets initiated.
+    /// When the subsystem returns an `Err`, it is assumed that the subsystem failed and a program
+    /// shutdown gets initiated.
     ///
     /// # Arguments
     ///
     /// * `name` - The name of the subsystem
     /// * `subsystem` - The subsystem to be started
-    ///
     pub fn start<Err, Fut, Subsys>(self, name: &str, subsystem: Subsys) -> Self
     where
         Subsys: 'static + FnOnce(SubsystemHandle<ErrType>) -> Fut + Send,
@@ -173,7 +177,6 @@ impl<ErrType: ErrTypeTraits> Toplevel<ErrType> {
     /// This function internally uses [tokio::signal] with all of its caveats.
     ///
     /// Especially the caveats from [tokio::signal::unix::Signal] are important for Unix targets.
-    ///
     pub fn catch_signals(self) -> Self {
         let shutdown_token = self.subsys_handle.group_shutdown_token().clone();
 
@@ -225,20 +228,51 @@ impl<ErrType: ErrTypeTraits> Toplevel<ErrType> {
     /// When a program shutdown happens, this function collects the return values of all subsystems
     /// to determine the return code of the entire program.
     ///
-    /// When the shutdown takes longer than the given timeout, an error will be returned and remaining subsystems
-    /// will be cancelled.
+    /// When the shutdown takes longer than the given timeout, an error will be returned and
+    /// remaining subsystems will be cancelled.
     ///
     /// # Arguments
     ///
-    /// * `shutdown_timeout` - The maximum time that is allowed to pass after a shutdown was initiated.
+    /// * `shutdown_timeout` - The maximum time that is allowed to pass after a shutdown was
+    ///   initiated.
     ///
     /// # Returns
     ///
     /// An error of type [`GracefulShutdownError`] if an error occurred.
-    ///
     pub async fn handle_shutdown_requests(
+        self,
+        shutdown_timeout: Duration,
+    ) -> Result<(), GracefulShutdownError<ErrType>> {
+        self.handle_shutdown_requests_opt_force_shutdown(shutdown_timeout, None)
+            .await
+    }
+
+    /// Performs a clean program shutdown, once a shutdown is requested or all subsystems have
+    /// finished.
+    ///
+    /// Compared to [`handle_shutdown_requests`](Self::handle_shutdown_requests), this adds
+    /// force-exiting the process if tokio `JoinHandle`s still don't resolve after asking for abort
+    ///
+    /// If clean shutdown doesn't finish, remaining subsystems will be "aborted".
+    ///
+    /// If after the extra timeout after timeout, remaining subsystems still haven't cancelled,
+    /// a `log::error` will be printed out, then
+    pub async fn handle_shutdown_requests_forcing_process_exit_on_timeout_after_tasks_abort(
+        self,
+        shutdown_timeout: Duration,
+        timeout_if_no_end_after_tokio_tasks_abort: Duration,
+    ) -> Result<(), GracefulShutdownError<ErrType>> {
+        self.handle_shutdown_requests_opt_force_shutdown(
+            shutdown_timeout,
+            Some(timeout_if_no_end_after_tokio_tasks_abort),
+        )
+        .await
+    }
+
+    async fn handle_shutdown_requests_opt_force_shutdown(
         mut self,
         shutdown_timeout: Duration,
+        force_shutdown_by_process_exit_additional_timeout: Option<Duration>,
     ) -> Result<(), GracefulShutdownError<ErrType>> {
         // Remove the shutdown guard we hold ourselves, to enable auto-shutdown triggering
         // when all subsystems are finished
@@ -254,13 +288,24 @@ impl<ErrType: ErrTypeTraits> Toplevel<ErrType> {
             log::error!("Shutdown timed out. Attempting to cleanup stale subsystems ...");
             timeout_occurred.store(true, Ordering::SeqCst);
             self.subsys_data.cancel_all_subsystems();
-            // Await forever, because we don't want to cancel the attempt_clean_shutdown.
-            // Resolving this arm of the tokio::select would cancel the other side.
-            wait_forever().await;
+
+            if let Some(force_shutdown_by_process_exit_additional_timeout) =
+                force_shutdown_by_process_exit_additional_timeout
+            {
+                tokio::time::sleep(force_shutdown_by_process_exit_additional_timeout).await;
+            } else {
+                wait_forever().await
+            }
         };
 
         let result = tokio::select! {
-            _ = cancel_on_timeout => unreachable!(),
+            _ = cancel_on_timeout => {
+                // If this resolves, this means we haven't got a result after 2x shutdown_timeout,
+                // which means there is a freeze after force-cancelling the futures,
+                // which means a task has gone into deadlock
+                log::error!("Shutdown timed out after cancelling all subsystems - force-exiting process");
+                std::process::exit(1);
+            },
             result = self.attempt_clean_shutdown() => result
         };
 
